@@ -4,17 +4,17 @@ import logging
 
 from homeassistant.components.vacuum import (
     StateVacuumEntity,
+    VacuumActivity,
     VacuumEntityFeature,
 )
-
-STATE_CLEANING = "cleaning"
-STATE_DOCKED = "docked"
-STATE_ERROR = "error"
-STATE_IDLE = "idle"
-STATE_PAUSED = "paused"
-STATE_RETURNING = "returning"
-
 from homeassistant.helpers.icon import icon_for_battery_level
+
+STATE_CLEANING = VacuumActivity.CLEANING
+STATE_DOCKED = VacuumActivity.DOCKED
+STATE_ERROR = VacuumActivity.ERROR
+STATE_IDLE = VacuumActivity.IDLE
+STATE_PAUSED = VacuumActivity.PAUSED
+STATE_RETURNING = VacuumActivity.RETURNING
 
 from . import DOMAIN, VacDevice
 
@@ -80,11 +80,10 @@ class WebackVacuumRobot(StateVacuumEntity):
         self.device.subscribe(lambda vacdevice: self.schedule_update_ha_state(False))
         self._error = None
 
+        # TURN_ON/TURN_OFF/STATUS/BATTERY are not supported by StateVacuumEntity
+        # anymore; battery is exposed by the sensor platform instead.
         self._attr_supported_features = (
-            VacuumEntityFeature.TURN_ON
-            | VacuumEntityFeature.TURN_OFF
-            | VacuumEntityFeature.STATUS
-            | VacuumEntityFeature.BATTERY
+            VacuumEntityFeature.STATE
             | VacuumEntityFeature.PAUSE
             | VacuumEntityFeature.STOP
             | VacuumEntityFeature.RETURN_HOME
@@ -117,8 +116,8 @@ class WebackVacuumRobot(StateVacuumEntity):
         return self.device.is_available
 
     @property
-    def state(self):
-        """Return the current state of the vacuum."""
+    def activity(self):
+        """Return the current activity of the vacuum."""
         try:
             state_mapping = STATE_MAPPING[self.device.current_mode]
             _LOGGER.debug("Vacuum: state(from mapping)=%s", state_mapping)
@@ -220,6 +219,9 @@ class WebackVacuumRobot(StateVacuumEntity):
         extra_value = {
             "robot_mode": mode,
             "error_info": self.device.error_info,
+            # Kept for dashboards written against the old vacuum battery attribute
+            "battery_level": self.battery_level,
+            "battery_icon": self.battery_icon,
         }
 
         if "volume" in self.device.robot_status:

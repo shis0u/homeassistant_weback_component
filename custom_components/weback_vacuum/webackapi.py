@@ -137,6 +137,14 @@ class WebackApi:
         _LOGGER.error("WebackApi can't login (reason is: %s)", result_msg)
         return False
 
+    def _api_headers(self):
+        """
+        Auth headers for api_url calls.
+        The WeBack app (6.1.7) sends them lowercase; the cloud now answers 403
+        to the capitalised `Token`/`Region` variant.
+        """
+        return {"token": self.jwt_token, "region": self.region_name}
+
     @staticmethod
     def check_token_is_valid(token) -> bool:
         """
@@ -162,7 +170,7 @@ class WebackApi:
 
         params = {
             "json": {"opt": "user_thing_list_get"},
-            "headers": {"Token": self.jwt_token, "Region": self.region_name},
+            "headers": self._api_headers(),
         }
         resp = await self.send_http(self.api_url, **params)
 
@@ -188,7 +196,7 @@ class WebackApi:
                 "sub_type": sub_type,
                 "thing_name": thing_name,
             },
-            "headers": {"Token": self.jwt_token, "Region": self.region_name},
+            "headers": self._api_headers(),
         }
 
         resp = await self.send_http(self.api_url, **params)
@@ -413,7 +421,6 @@ class WebackWssCtrl(WebackApi):
         super().__init__(user, password, region, country, app, client_id, api_version)
         _LOGGER.debug("WebackApi WSS Control __init__")
         self.ws = None
-        self.authorization = "Basic KG51bGwpOihudWxsKQ=="
         self.socket_state = SOCK_CLOSE
         self.robot_status = None
         self.subscriber = []
@@ -458,13 +465,8 @@ class WebackWssCtrl(WebackApi):
         try:
             self.ws = websocket.WebSocketApp(
                 self.wss_url,
-                header={
-                    "Authorization": self.authorization,
-                    "region": self.region_name,
-                    "token": self.jwt_token,
-                    "Connection": "keep-alive, Upgrade",
-                    "handshakeTimeout": "10000",
-                },
+                # Same handshake headers as the WeBack app (okhttp): token + region only
+                header=self._api_headers(),
                 on_message=self.on_message,
                 on_close=self.on_close,
                 on_open=self.on_open,

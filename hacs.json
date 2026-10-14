@@ -1,3 +1,4 @@
 {
-  "name": "Weback vacuum",
+  "name": "WeBack vacuum (WeBack 6.x fork)",
+  "homeassistant": "2025.1.0"
 }

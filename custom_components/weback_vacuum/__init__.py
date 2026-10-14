@@ -26,7 +26,8 @@ CONF_APP = "application"
 DEFAULT_LANGUAGE = "en"
 DEFAULT_APP = "WeBack"
 DEFAULT_CLIENT_ID = "yugong_app"
-DEFAULT_API_VERS = "1.0"
+# WeBack app sends its own versionName as api_version
+DEFAULT_API_VERS = "6.1.7"
 
 CONFIG_SCHEMA = vol.Schema(
     {
@@ -104,4 +105,5 @@ async def async_setup(hass, config):
         _LOGGER.debug("Starting vacuum robot components")
         load_platform(hass, "vacuum", DOMAIN, {}, config)
         load_platform(hass, "camera", DOMAIN, {}, config)
+        load_platform(hass, "sensor", DOMAIN, {}, config)
     return True
