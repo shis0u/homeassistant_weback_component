@@ -11,6 +11,8 @@
 > - `api_version` defaults to the app version `6.1.7`
 > - vacuum state reported via `activity`; removed feature flags (`BATTERY`, `TURN_ON`, ...) dropped
 > - battery: new `sensor.<name>_battery`, and `battery_level` stays a vacuum attribute for existing dashboards
+> - robots without LIDAR (gyro): the map camera (`camera.<name>_map`) shows the cleaning path like the app.
+>   Enable the camera entity if it is disabled. The path is requested every 15 s while the robot cleans
 >
 > **Switching from the original:** the domain (`weback_vacuum`) and the `configuration.yaml` block are unchanged.
 > In HACS remove "WeBack/Tesvor Vacuum", add this repository as a custom repository (category *Integration*),
