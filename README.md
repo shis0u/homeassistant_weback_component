@@ -4,6 +4,18 @@
 [![hacs_badge](https://img.shields.io/badge/HACS-Default-41BDF5.svg?style=for-the-badge)](https://github.com/hacs/integration)\
 ![Maintenance](https://img.shields.io/maintenance/no/2025?style=flat-square)
 
+> **Fork note** — this fork keeps the integration working with the current WeBack cloud
+> (protocol checked against the WeBack 6.1.7 Android app) and Home Assistant 2026.x:
+> - API/WSS auth headers sent lowercase (`token`, `region`) like the app; the cloud answered `403` to `Token`/`Region`
+> - WSS handshake matches the app (no fake `Authorization` header)
+> - `api_version` defaults to the app version `6.1.7`
+> - vacuum state reported via `activity`; removed feature flags (`BATTERY`, `TURN_ON`, ...) dropped
+> - battery: new `sensor.<name>_battery`, and `battery_level` stays a vacuum attribute for existing dashboards
+>
+> **Switching from the original:** the domain (`weback_vacuum`) and the `configuration.yaml` block are unchanged.
+> In HACS remove "WeBack/Tesvor Vacuum", add this repository as a custom repository (category *Integration*),
+> download it and restart Home Assistant. No config changes needed.
+
 Home Assistant component for controlling robot from brand like : Neatsvor / Tesvor / Orfeld / Abir...
 This component can control robot using WeBack app.
 
