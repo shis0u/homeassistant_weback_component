@@ -14,7 +14,8 @@ import httpx
 import websocket
 import ssl
 
-from .vacmap import VacMap
+from .gyromap import GyroPathMap
+from .vacmap import VacMap, decode_map_payload
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -33,9 +34,58 @@ AUTH_URL = "https://user.grit-cloud.com/prod/oauth"
 AUTH_URL_CHINA = "https://user.grit-cloud.cn/prod/oauth"
 ROBOT_UPDATE = "thing_status_update"
 MAP_DATA = "map_data"
-N_RETRY = 8
+N_RETRY = 4
 ACK_TIMEOUT = 5
 HTTP_TIMEOUT = 5
+# Renew the token this long before it expires
+TOKEN_RENEW_MARGIN = timedelta(minutes=15)
+# Same cadence as the app (MapActivity): ask for a map every 15s while cleaning, 10 tries max
+MAP_REQUEST_INTERVAL = 15
+MAP_REQUEST_MAX = 10
+# Robots from this firmware on push `map_data` after `begin_upload_map` (app: yw_es >= 6.0.5)
+MAP_WSS_MIN_VERSION = "6.0.5"
+
+_ssl_context = None
+
+
+async def _get_ssl_context():
+    """Shared SSL context, created once outside the event loop (loading CAs blocks)."""
+    global _ssl_context
+    if _ssl_context is None:
+        _ssl_context = await asyncio.get_running_loop().run_in_executor(
+            None, ssl.create_default_context
+        )
+    return _ssl_context
+
+
+def _version_at_least(version, minimum) -> bool:
+    """Compare dotted firmware versions like the app (digits of each part)."""
+
+    def parts(value):
+        result = []
+        for part in str(value).split("."):
+            digits = "".join(ch for ch in part if ch.isdigit())
+            result.append(int(digits) if digits else 0)
+        return result
+
+    if not version:
+        return False
+    current, wanted = parts(version), parts(minimum)
+    length = max(len(current), len(wanted))
+    current += [0] * (length - len(current))
+    wanted += [0] * (length - len(wanted))
+    return current >= wanted
+
+
+def _redact(params):
+    """Copy of request params without password hash or token, for debug logs."""
+    redacted = json.loads(json.dumps(params, default=str))
+    payload = redacted.get("json", {}).get("payload", {})
+    if "pwd" in payload:
+        payload["pwd"] = "***"
+    if "token" in redacted.get("headers", {}):
+        redacted["headers"]["token"] = "***"
+    return redacted
 
 
 class WebackApi:
@@ -145,22 +195,23 @@ class WebackApi:
         """
         return {"token": self.jwt_token, "region": self.region_name}
 
+    def adopt_session(self, other: "WebackApi"):
+        """Reuse the login of another API object instead of logging in again."""
+        self.jwt_token = other.jwt_token
+        self.region_name = other.region_name
+        self.wss_url = other.wss_url
+        self.api_url = other.api_url
+        self.token_duration = other.token_duration
+        self.token_exp = other.token_exp
+
     @staticmethod
     def check_token_is_valid(token) -> bool:
         """
-        Check if token validity is still OK or not
+        Check if token is still valid for at least TOKEN_RENEW_MARGIN
         """
-        _LOGGER.debug("WebackApi checking token validity : %s", token)
-        try:
-            now_date = datetime.today() - timedelta(minutes=15)
-            dt_token = datetime.strptime(str(token), "%Y-%m-%d %H:%M:%S.%f")
-            if now_date < dt_token:
-                _LOGGER.debug("WebackApi token is valid")
-                return True
-        except Exception as excpt_token:
-            _LOGGER.debug("WebackApi failed to check token : %s", excpt_token)
-        _LOGGER.debug("WebackApi token not valid")
-        return False
+        valid = token is not None and datetime.today() + TOKEN_RENEW_MARGIN < token
+        _LOGGER.debug("WebackApi token valid=%s (expires %s)", valid, token)
+        return valid
 
     async def get_robot_list(self):
         """
@@ -212,29 +263,24 @@ class WebackApi:
         """
         Send HTTP request
         """
-        _LOGGER.debug("Send HTTP request Url=%s Params=%s", url, params)
+        _LOGGER.debug("Send HTTP request Url=%s Params=%s", url, _redact(params))
         timeout = httpx.Timeout(HTTP_TIMEOUT, connect=15.0)
+        ssl_context = await _get_ssl_context()
 
-        # Create an SSL context that uses asyncio
-        ssl_context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
-
-        # Load default certs in a non-blocking way
-        loop = asyncio.get_running_loop()
-        await loop.run_in_executor(None, ssl_context.load_default_certs)
-
-        for attempt in range(N_RETRY):
-            try:
-                async with httpx.AsyncClient(
-                    timeout=timeout,
-                    verify=ssl_context,
-                ) as client:
+        async with httpx.AsyncClient(timeout=timeout, verify=ssl_context) as client:
+            for attempt in range(1, N_RETRY + 1):
+                try:
                     req = await client.post(url, **params)
                     if req.status_code == 200:
-                        # Server status OK
-                        _LOGGER.debug("WebackApi : Send HTTP OK, return=200")
-                        _LOGGER.debug("WebackApi : HTTP data received = %s", req.json())
+                        _LOGGER.debug("WebackApi : HTTP data received = %s", req.text)
                         return req.json()
-                    # Server status NOK
+                    if req.status_code < 500:
+                        # 4xx will not get better by retrying
+                        _LOGGER.error(
+                            "WebackApi : Bad server response (status code=%s)",
+                            req.status_code,
+                        )
+                        return {"msg": "error", "details": f"HTTP {req.status_code}"}
                     _LOGGER.warning(
                         "WebackApi : Bad server response (status code=%s) "
                         "retry... (%s/%s)",
@@ -242,13 +288,15 @@ class WebackApi:
                         attempt,
                         N_RETRY,
                     )
-            except httpx.RequestError as http_excpt:
-                _LOGGER.debug(
-                    "Send HTTP exception details=%s retry... (%s/%s)",
-                    http_excpt,
-                    attempt,
-                    N_RETRY,
-                )
+                except httpx.RequestError as http_excpt:
+                    _LOGGER.debug(
+                        "Send HTTP exception details=%s retry... (%s/%s)",
+                        http_excpt,
+                        attempt,
+                        N_RETRY,
+                    )
+                if attempt < N_RETRY:
+                    await asyncio.sleep(2 ** (attempt - 1))
         _LOGGER.error(
             "WebackApi : HTTP error after %s retry",
             N_RETRY,
@@ -427,8 +475,11 @@ class WebackWssCtrl(WebackApi):
         self.wst = None
         self.ws = None
         self.map = None
+        self.path_map = GyroPathMap()
         self._refresh_time = 60
         self._last_refresh = 0
+        self._last_map_time = 0
+        self._map_requests = 0
         self.sent_counter = 0
 
     async def check_credentials(self):
@@ -456,11 +507,14 @@ class WebackWssCtrl(WebackApi):
             return False
 
         _LOGGER.debug(
-            "WebackApi (WSS) Addr=%s / Region=%s / Token=%s",
+            "WebackApi (WSS) Addr=%s / Region=%s",
             self.wss_url,
             self.region_name,
-            self.jwt_token,
         )
+
+        # Do not leave the previous socket thread running next to the new one
+        if self.ws is not None:
+            self.ws.close()
 
         try:
             self.ws = websocket.WebSocketApp(
@@ -474,7 +528,7 @@ class WebackWssCtrl(WebackApi):
                 on_pong=self.on_pong,
             )
 
-            self.wst = threading.Thread(target=self.ws.run_forever)
+            self.wst = threading.Thread(target=self.ws.run_forever, daemon=True)
             self.wst.start()
 
             if self.wst.is_alive():
@@ -540,30 +594,26 @@ class WebackWssCtrl(WebackApi):
         """Socket "On_Message" event"""
         self.sent_counter = 0
         wss_data = json.loads(message)
-        _LOGGER.debug("WebackApi (WSS) Msg received %s", wss_data)
-        if wss_data["notify_info"] == ROBOT_UPDATE:
-            self.adapt_refresh_time(wss_data["thing_status"])
+        notify_info = wss_data.get("notify_info")
+        if notify_info == ROBOT_UPDATE:
+            _LOGGER.debug("WebackApi (WSS) Msg received %s", wss_data)
+            thing_status = wss_data.get("thing_status") or {}
+            self.adapt_refresh_time(thing_status)
 
-            if wss_data["thing_status"] != self.robot_status:
+            # The app merges partial updates into the known status
+            new_status = {**(self.robot_status or {}), **thing_status}
+            if new_status != self.robot_status:
                 _LOGGER.debug("New update from cloud ->> push update")
-                self.robot_status = wss_data["thing_status"]
+                self.robot_status = new_status
+                if self.map is None and self.path_map.update_from_status(new_status):
+                    self.on_map_update()
                 self._call_subscriber()
             else:
                 _LOGGER.debug("No update from cloud")
-        elif wss_data["notify_info"] == MAP_DATA:
+        elif notify_info == MAP_DATA:
             _LOGGER.debug("WebackApi (WSS) Map data received")
-            try:
-                if not self.map:
-                    self.map = VacMap(wss_data["map_data"])
-                else:
-                    self.map.wss_update(wss_data["map_data"])
-            except Exception as msg_excpt:
-                _LOGGER.error(
-                    "WebackApi (WSS) Error during on_message (map_data) (details=%s)",
-                    msg_excpt,
-                )
-
-            self.adapt_refresh_time(self.robot_status)
+            self._handle_map_data(wss_data.get("map_data"))
+            self.adapt_refresh_time(self.robot_status or {})
             self._call_subscriber()
         else:
             _LOGGER.error(
@@ -577,6 +627,74 @@ class WebackWssCtrl(WebackApi):
             _LOGGER.debug("WebackApi (WSS) Closing WSS...")
             self.ws.close()
             self.socket_state = SOCK_CLOSE
+
+    def _handle_map_data(self, raw_map):
+        """Decode a pushed map: LIDAR map (MapData) or gyro cleaning path (ProMapData)."""
+        try:
+            data = decode_map_payload(raw_map)
+            if "MapData" in data:
+                if not self.map:
+                    self.map = VacMap(data)
+                else:
+                    self.map.wss_update(data)
+            elif self.path_map.update_from_pro_map(data):
+                self._map_requests = 0
+                self._last_map_time = time.time()
+            else:
+                _LOGGER.debug("WebackApi (WSS) Unsupported map payload keys=%s", list(data))
+                return
+            self.on_map_update()
+        except Exception as msg_excpt:
+            _LOGGER.error(
+                "WebackApi (WSS) Error during on_message (map_data) (details=%s)",
+                msg_excpt,
+            )
+
+    def on_map_update(self):
+        """Called (from the socket thread) after the map changed"""
+
+    async def request_map(self, thing_name, sub_type):
+        """
+        Ask a non-LIDAR robot to upload its cleaning map, like the app does while
+        its map screen is open: every 15s while cleaning, at most 10 times in a row.
+        """
+        status = self.robot_status or {}
+        if self.map is not None:
+            return
+        if status.get("working_status") not in self.CLEANING_STATES:
+            self._map_requests = 0
+            return
+        if (
+            time.time() - self._last_map_time < MAP_REQUEST_INTERVAL
+            or self._map_requests >= MAP_REQUEST_MAX
+        ):
+            return
+        self._map_requests += 1
+        self._last_map_time = time.time()
+
+        if _version_at_least(status.get("yugong_software_version"), MAP_WSS_MIN_VERSION):
+            topic = "grit_tech/notify/server_2_device/" + thing_name
+            topic_payload = {
+                "notify_info": "begin_upload_map",
+                "cmd_timestamp_s": int(time.time()),
+            }
+        else:
+            topic = f"WeBack/device_change/notify/{sub_type}/{thing_name}"
+            topic_payload = {
+                "Notify_Info": "send_map",
+                "cmd_timestamp_s": int(time.time()),
+                "User_Account": f"00{self.region}-{self.user}",
+            }
+        _LOGGER.debug("WebackApi (WSS) requesting map (%s)", topic)
+        await self.publish_wss(
+            {
+                "opt": "send_to_device",
+                "sub_type": sub_type,
+                "thing_name": thing_name,
+                "topic_name": topic,
+                "topic_payload": topic_payload,
+            }
+        )
 
     async def publish_wss(self, dict_message):
         """
@@ -692,6 +810,10 @@ class WebackWssCtrl(WebackApi):
                         refresh_excpt,
                     )
                 self._last_refresh = time.time()
+            try:
+                await self.request_map(thing_name, sub_type)
+            except Exception as map_excpt:
+                _LOGGER.debug("WebackApi (WSS) map request failed (%s)", map_excpt)
             await asyncio.sleep(5)
 
     def subscribe(self, subscriber):

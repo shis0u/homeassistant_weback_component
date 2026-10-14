@@ -98,7 +98,12 @@ async def async_setup(hass, config):
             config[DOMAIN].get(CONF_CLIENT_ID),
             config[DOMAIN].get(CONF_API_VERSION),
         )
+        # Reuse the login done above instead of one more login per robot
+        vacuum_device.adopt_session(weback_api)
         await vacuum_device.load_maps()
+        # Legacy gyro firmware already reports the cleaning path in its status
+        if vacuum_device.path_map.update_from_status(vacuum_device.robot_status):
+            vacuum_device.render_map()
         hass.data[DOMAIN].append(vacuum_device)
 
     if hass.data[DOMAIN]:

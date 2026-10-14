@@ -122,6 +122,19 @@ class VacMapRoom:
         }
 
 
+def decode_map_payload(data_input):
+    """Decode a WeBack map payload (base64 of zlib-compressed JSON)."""
+    if isinstance(data_input, dict):
+        return data_input
+    return json.loads(zlib.decompress(base64.b64decode(data_input)))
+
+
+# Each map byte packs four 2-bit pixels -> four lightness values (0/85/170/255)
+_BITMAP_TABLE = [
+    bytes(((byte >> shift) & 3) * 85 for shift in (6, 4, 2, 0)) for byte in range(256)
+]
+
+
 class VacMap:
     MAP_FORMAT_YW_LASER = "yw_ls"
     MAP_FORMAT_YW_VISUAL = "yw_vs"
@@ -138,7 +151,7 @@ class VacMap:
         self.load_data(data_input)
 
     def load_data(self, data_input):
-        self.data = json.loads(zlib.decompress(base64.b64decode(data_input)))
+        self.data = decode_map_payload(data_input)
         self.map_data = bytearray(base64.b64decode(self.data["MapData"]))
         self.map_bitmap = False
         self.map_scale = 4
@@ -164,15 +177,7 @@ class VacMap:
 
     def get_map_bitmap(self):
         """Parse MapData into 8-Bit lightness (grayscale) bitmap, return it as bytes"""
-        self.map_bitmap = bytearray(b"")
-        for i in range(len(self.map_data)):
-            byte = self.map_data[i]
-
-            self.map_bitmap.append(((byte & 192) >> 6) * 85)
-            self.map_bitmap.append(((byte & 48) >> 4) * 85)
-            self.map_bitmap.append(((byte & 12) >> 2) * 85)
-            self.map_bitmap.append((byte & 3) * 85)
-
+        self.map_bitmap = b"".join(_BITMAP_TABLE[byte] for byte in self.map_data)
         return self.map_bitmap
 
     def get_map_image(self, black=(0x1C, 0x89, 0xE3), white=(0xFF, 0xFF, 0xFF)):
@@ -186,21 +191,10 @@ class VacMap:
             (int(self.data["MapWidth"]), int(self.data["MapHigh"])),
             bytes(self.map_bitmap),
         )
-        img = ImageOps.colorize(img, black, white)
-        img = img.convert("RGBA")
-
-        img_data = img.getdata()
-
-        new_img_data = []
-
-        for pixel in img_data:
-            if pixel[0] == 255 and pixel[1] == 255 and pixel[2] == 255:
-                new_img_data.append((255, 255, 255, 0))
-            else:
-                new_img_data.append(pixel)
-
-        img.putdata(new_img_data)
-        del new_img_data
+        # Pure white pixels become transparent
+        alpha = img.point(lambda value: 0 if value == 255 else 255)
+        img = ImageOps.colorize(img, black, white).convert("RGBA")
+        img.putalpha(alpha)
 
         return img.resize(
             (

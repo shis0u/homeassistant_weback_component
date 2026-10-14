@@ -67,7 +67,7 @@ class WebackVacuumCamera(Camera):
         height: int | None = None,
     ) -> bytes | None:
         """Return bytes of camera image."""
-        if self._vacdevice.map:
+        if self._vacdevice.has_map:
             return self.generate_image()
         return None
 

@@ -39,6 +39,7 @@ class VacDevice(WebackWssCtrl):
         self.map = None
         self.map_image_buffer = None
         self.map_camera = None
+        self._loop = None
 
         # First init status from HTTP API
         if self.robot_status is None:
@@ -54,6 +55,7 @@ class VacDevice(WebackWssCtrl):
             self.name,
             self.sub_type,
         )
+        self._loop = asyncio.get_running_loop()
         try:
             await self.refresh_handler(self.name, self.sub_type)
         except Exception as watch_excpt:
@@ -68,8 +70,17 @@ class VacDevice(WebackWssCtrl):
 
         # Some vacuums won't have hismap_id in the initial status, but will
         # report it later on. Let's make sure we try to load map again then.
-        if self.ACTIVE_MAP_ID_PROP in self.robot_status and not self.map:
-            asyncio.run(self.load_maps())
+        # (runs in the socket thread: hand the coroutine to the HA event loop)
+        if (
+            self.ACTIVE_MAP_ID_PROP in self.robot_status
+            and not self.map
+            and self._loop is not None
+        ):
+            asyncio.run_coroutine_threadsafe(self.load_maps(), self._loop)
+
+    def on_map_update(self):
+        """Map or cleaning path changed: re-render the camera image"""
+        self.render_map()
 
     async def load_maps(self):
         """Load the current reuse map"""
@@ -90,7 +101,12 @@ class VacDevice(WebackWssCtrl):
     def render_map(self):
         """Rendering Map"""
         if not self.map:
-            return False
+            # Robots without LIDAR: draw the cleaning path like the app does
+            if not self.path_map.has_data:
+                return False
+            self.map_image_buffer = self.path_map.render_png()
+            self.trigger_map_camera_update()
+            return True
 
         vac_map_draw = VacMapDraw(self.map)
         vac_map_draw.draw_charger_point()
@@ -115,7 +131,7 @@ class VacDevice(WebackWssCtrl):
 
     def trigger_map_camera_update(self):
         """Trigger map camera update"""
-        if self.map_camera is not None:
+        if self.map_camera is not None and self.map_camera.hass is not None:
             self.map_camera.schedule_update_ha_state(True)
 
     # ==========================================================
@@ -132,13 +148,16 @@ class VacDevice(WebackWssCtrl):
     @property
     def raw_status(self) -> str:
         """Raw thing_status JSON"""
-        _LOGGER.debug("raw_status %s", self.robot_status)
         return self.robot_status
+
+    @property
+    def has_map(self) -> bool:
+        """LIDAR map or cleaning path available"""
+        return self.map is not None or self.map_image_buffer is not None
 
     @property
     def is_cleaning(self) -> bool:
         """Boolean define if robot is in cleaning state"""
-        _LOGGER.debug("is_cleaning = %s ", self.current_mode)
         return self.current_mode in self.CLEANING_STATES
 
     @property
@@ -207,7 +226,7 @@ class VacDevice(WebackWssCtrl):
     @property
     def vacuum_or_mop(self) -> int:
         """Find if the robot is in vacuum or mop mode"""
-        if "fan_status" and "water_level" in self.robot_status:
+        if "fan_status" in self.robot_status and "water_level" in self.robot_status:
             if (
                 self.robot_status["fan_status"] == self.FAN_DISABLED
                 and self.robot_status["water_level"] != self.MOP_DISABLED

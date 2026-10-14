@@ -112,7 +112,6 @@ class WebackVacuumRobot(StateVacuumEntity):
     @property
     def available(self):
         """Returns true if vacuum is online"""
-        _LOGGER.debug("Vacuum: available=%s", self.device.is_available)
         return self.device.is_available
 
     @property
@@ -120,7 +119,6 @@ class WebackVacuumRobot(StateVacuumEntity):
         """Return the current activity of the vacuum."""
         try:
             state_mapping = STATE_MAPPING[self.device.current_mode]
-            _LOGGER.debug("Vacuum: state(from mapping)=%s", state_mapping)
             return state_mapping
         except KeyError:
             _LOGGER.exception(
@@ -137,11 +135,6 @@ class WebackVacuumRobot(StateVacuumEntity):
     @property
     def battery_icon(self):
         """Return the battery icon for the vacuum cleaner."""
-        _LOGGER.debug(
-            "Vacuum: battery_icon battery_level=%s, charging=%s",
-            self.battery_level,
-            self.is_charging,
-        )
         return icon_for_battery_level(
             battery_level=self.battery_level,
             charging=self.is_charging,
@@ -153,14 +146,11 @@ class WebackVacuumRobot(StateVacuumEntity):
         # Check if robot is in Vacuum/Mop mode
         if self.device.vacuum_or_mop == 1:
             # Vacuum mode
-            _LOGGER.debug("Vacuum: (vacuum mode) fan_speed=%s", self.device.fan_status)
             return self.device.fan_status
         if self.device.vacuum_or_mop == 2:
             # Mop mode
-            _LOGGER.debug("Vacuum: (mop mode) fan_speed=%s", self.device.mop_status)
             return self.device.mop_status
         # No Mop / No Fan
-        _LOGGER.debug("Vacuum: no Fan / no Mop")
         return None
 
     @property
@@ -172,26 +162,16 @@ class WebackVacuumRobot(StateVacuumEntity):
         # Check if robot is in Vacuum/Mop mode
         if self.device.vacuum_or_mop == 1:
             # Vacuum mode
-            _LOGGER.debug(
-                "Vacuum: (vacuum mode) fan_speed_list=%s",
-                self.device.fan_speed_list,
-            )
             return self.device.fan_speed_list
         if self.device.vacuum_or_mop == 2:
             # Mop mode
-            _LOGGER.debug(
-                "Vacuum: (mop mode) fan_speed_list=%s",
-                self.device.mop_level_list,
-            )
             return self.device.mop_level_list
         # No Mop / No Fan
-        _LOGGER.debug("Vacuum: no Fan / no Mop fan_speed_list=None")
         return None
 
     @property
     def error(self):
         """Error messages"""
-        _LOGGER.debug("Vacuum: error=%s", self.device.error_info)
         return self.device.error_info
 
     @property
@@ -202,7 +182,6 @@ class WebackVacuumRobot(StateVacuumEntity):
     @property
     def is_on(self):
         """Return true if vacuum is currently cleaning."""
-        _LOGGER.debug("Vacuum: is_on=%s", self.device.is_cleaning)
         return self.device.is_cleaning
 
     @property
